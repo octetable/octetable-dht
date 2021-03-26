@@ -27,6 +27,11 @@ impl Key {
         &self.0
     }
 
+    /// The log2 of the distance with `other`, between 0 and 160.
+    pub fn dist_log2(&self, other: Key) -> usize {
+        160 - self.bitxor(other).leading_zeros()
+    }
+
     pub(crate) fn leading_zeros(&self) -> usize {
         let mut ret = 0;
         for i in 0..self.0.len() {
@@ -39,7 +44,11 @@ impl Key {
         ret
     }
 
-    /// Constructs a new random `Key` from `[2^(20 - index - 1), 2^(20 - index))`.
+    /// Constructs a new random `Key` where the first `index` bits are 0.
+    ///
+    /// Equivalently, we can say that the key belongs to the range
+    /// `[2^(160 - index - 1), 2^(160 - index)]`.
+    /// If `index` >= 160, then all the bits are zeros.
     pub(crate) fn rand_in_range(index: usize) -> Self {
         let mut ret = Key::rand();
         let bytes = index / 8;
@@ -47,8 +56,10 @@ impl Key {
         for i in 0..bytes {
             ret.0[i] = 0;
         }
-        ret.0[bytes] &= 0xFF >> (bit);
-        ret.0[bytes] |= 1 << (8 - bit - 1);
+        if bytes < ret.0.len() {
+            ret.0[bytes] &= 0xFF >> (bit);
+            ret.0[bytes] |= 1 << (8 - bit - 1);
+        }
         ret
     }
 }
@@ -106,15 +117,21 @@ mod tests {
 
     #[test]
     fn key_basics() {
-        let mut b = Key::builder();
-        b.write_bytes(b"hello world");
-        let k = b.finish();
+        let a = Key::rand_in_range(10);
+        let b = Key::rand_in_range(80);
+        let c = Key::rand();
+        assert!(a > b);
+        assert!(a.dist_log2(b) == 150);
+        assert!(b.dist_log2(a) == 150);
+        assert!(a.dist_log2(a) == 0);
+        assert!(b.to_string().as_str()[..20] == "0".repeat(20));
+        assert!(a ^ a == Key::rand_in_range(160));
+        assert!(a ^ b == b ^ a);
+        assert!((a ^ b) ^ (b ^ c) == a ^ c);
+
+        let mut kb = Key::builder();
+        kb.write_bytes(b"hello world");
+        let k = kb.finish();
         assert_eq!("2aae6c35c94fcfb415dbe95f408b9ce91ee846ed", k.to_string());
-
-        let a = Key::rand_in_range(80);
-        assert_eq!("0".repeat(20), &a.to_string()[..20]);
-
-        let b = Key::rand();
-        assert_eq!(a ^ b, a.bitxor(b));
     }
 }

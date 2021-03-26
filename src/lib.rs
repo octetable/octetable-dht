@@ -1,6 +1,7 @@
 mod connector;
 mod error;
-mod kbucket;
+mod key;
+mod routing;
 mod rpc;
 
 pub use error::Error;
