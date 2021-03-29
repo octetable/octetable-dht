@@ -1,30 +1,33 @@
 use tokio::{net::UdpSocket, sync::mpsc::{UnboundedReceiver, UnboundedSender}};
-use tokio_util::{codec::BytesCodec, udp::UdpFramed};
-use bytes::{Bytes};
+use tokio_util::{udp::UdpFramed};
 use futures::{FutureExt, SinkExt, select, stream::StreamExt};
 use std::net::SocketAddr;
-use std::str;
 
-pub type ConnectorReceiver = UnboundedReceiver<(SocketAddr, String)>;
-pub type ConnectorSender = UnboundedSender<(SocketAddr, String)>;
+use crate::{rpc::{RpcMessage, RpcCodec}};
+
+pub type ConnectorReceiver = UnboundedReceiver<(RpcMessage, SocketAddr)>;
+pub type ConnectorSender = UnboundedSender<(RpcMessage, SocketAddr)>;
 
 pub fn new_connector(addr: SocketAddr) -> (ConnectorSender, ConnectorReceiver) {
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::unbounded_channel::<(SocketAddr, String)>();
-    let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::unbounded_channel::<(SocketAddr, String)>();
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::unbounded_channel::<(RpcMessage, SocketAddr)>();
+    let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::unbounded_channel::<(RpcMessage, SocketAddr)>();
     tokio::spawn(async move {
         let socket = UdpSocket::bind(&addr).await.unwrap();
-        let framed = UdpFramed::new(socket, BytesCodec::new());
+        let framed = UdpFramed::new(socket, RpcCodec::new());
         let (mut udp_tx, mut udp_rx) = framed.split();
         loop {          
             select! {
                 res = udp_rx.next().fuse() => {
                     println!("Socket recv: {:?}", res);
                     match res {
-                        Some(Ok((data, addr))) => {
-                            let res = outbound_tx.send((addr, str::from_utf8(&data).unwrap().to_string()));
-                            println!("tx send: {:?}", res);
+                        Some(Ok((msg, addr))) => {
+                            if let Err(e) = outbound_tx.send((msg, addr)) {
+                                println!("Socket sender error: {:?}", e);
+                                break
+                            }
                         }
                         _ => {
+                            println!("Socket receiver closed!");
                             break
                         }
                     }
@@ -32,17 +35,21 @@ pub fn new_connector(addr: SocketAddr) -> (ConnectorSender, ConnectorReceiver) {
                 res = inbound_rx.recv().fuse() => {
                     println!("rx recv: {:?}", res);
                     match res {
-                        Some((addr, data)) => {
-                            let res = udp_tx.send((Bytes::from(data), addr)).await;
-                            println!("socket send: {:?}", res);
+                        Some((msg, addr)) => {
+                            if let Err(e) = udp_tx.send((msg, addr)).await {
+                                println!("Socket sender error: {:?}", e);
+                                break
+                            }
                         }
                         _ => {
+                            println!("Inbound channel closed!");
                             break
                         }
                     }  
                 }
             }
         }
+        println!("Connector closed!");
     });
 
     (inbound_tx, outbound_rx)
@@ -52,15 +59,23 @@ pub fn new_connector(addr: SocketAddr) -> (ConnectorSender, ConnectorReceiver) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use futures::SinkExt;
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::{time, net::UdpSocket};
     use tokio_stream::StreamExt;
-    use tokio_util::{codec::BytesCodec, udp::UdpFramed};
+    use tokio_util::udp::UdpFramed;
 
-    async fn read_from_socket(socket: &mut UdpFramed<BytesCodec>) -> Result<(), ()> {
+    fn select_msg() -> RpcMessage {
+        match fastrand::u8(0..3) {
+            0 => RpcMessage::FindNode,
+            1 => RpcMessage::FindValue,
+            2 => RpcMessage::Ping,
+            _ => RpcMessage::Store,
+        }
+    }
+
+    async fn read_from_socket(socket: &mut UdpFramed<RpcCodec>) -> Result<(), ()> {
         let timeout = Duration::from_millis(200);
         while let Ok(Some(Ok((req, addr)))) = time::timeout(timeout, socket.next()).await {
             println!("[socket] recv: {:?} {:?}", addr, req);
@@ -68,16 +83,20 @@ mod tests {
         Ok(())
     }
 
-    async fn write_into_socket(socket: &mut UdpFramed<BytesCodec>, addr: SocketAddr) -> Result<(), ()> {
+    async fn write_into_socket(socket: &mut UdpFramed<RpcCodec>, addr: SocketAddr) -> Result<(), ()> {
         for _ in 0..4usize {
-            socket.send((Bytes::from(&b"Hello from socket"[..]), addr)).await.unwrap();
+            let msg = select_msg();
+            println!("Sending {:?} into socket", msg);
+            socket.send((msg, addr)).await.unwrap();
         }
         Ok(())
     }
 
     async fn send_to_connector(tx: ConnectorSender, addr: SocketAddr) -> Result<(), ()> {
         for _ in 0..4usize {
-            tx.send((addr, "Hello connector".to_string())).unwrap();
+            let msg = select_msg();
+            println!("Sending {:?} to connector", msg);
+            tx.send((msg, addr)).unwrap();
         }
         Ok(())
     } 
@@ -100,7 +119,7 @@ mod tests {
         let b_addr = b.local_addr().unwrap();
 
         
-        let mut b = UdpFramed::new(b, BytesCodec::new());
+        let mut b = UdpFramed::new(b, RpcCodec::new());
         let read = read_from_socket(&mut b);
 
         let send = send_to_connector(a_tx, b_addr);
@@ -121,7 +140,7 @@ mod tests {
 
         let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         
-        let mut b = UdpFramed::new(b, BytesCodec::new());
+        let mut b = UdpFramed::new(b, RpcCodec::new());
     
         let write = write_into_socket(&mut b, a_addr);
 
@@ -142,11 +161,11 @@ mod tests {
 
         let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a_addr = a.local_addr().unwrap();    
-        let mut a = UdpFramed::new(a, BytesCodec::new());
+        let mut a = UdpFramed::new(a, RpcCodec::new());
         let read_socket = read_from_socket(&mut a);
         
         let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut b = UdpFramed::new(b, BytesCodec::new());
+        let mut b = UdpFramed::new(b, RpcCodec::new());
     
         let write_socket = write_into_socket(&mut b, c_addr);
 
