@@ -1,7 +1,7 @@
-use bytes::{Buf, BufMut, BytesMut};
-use tokio_util::codec::{Decoder, Encoder};
 use std::io;
 
+use bytes::{Buf, BufMut, BytesMut};
+use tokio_util::codec::{Decoder, Encoder};
 
 const FIND_NODE: u8 = 0;
 const FIND_VALUE: u8 = 2;
@@ -19,7 +19,7 @@ pub enum RpcMessage {
 #[derive(Debug)]
 pub enum CodecError {
     Io(io::Error),
-    InvalidRpcMessage(u8)
+    InvalidRpcMessage(u8),
 }
 
 impl From<io::Error> for CodecError {
@@ -51,7 +51,7 @@ impl Decoder for RpcCodec {
                 FIND_VALUE => Ok(Some(RpcMessage::FindValue)),
                 PING => Ok(Some(RpcMessage::Ping)),
                 STORE => Ok(Some(RpcMessage::Store)),
-                d => Err(CodecError::InvalidRpcMessage(d))
+                d => Err(CodecError::InvalidRpcMessage(d)),
             }
         } else {
             Ok(None)
