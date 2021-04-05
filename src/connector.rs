@@ -7,19 +7,19 @@ use tokio::{
 };
 use tokio_util::udp::UdpFramed;
 
-use crate::rpc::{RpcCodec, RpcMessage};
+use crate::rpc::{Message, MessageCodec};
 
-pub type ConnectorReceiver = UnboundedReceiver<(RpcMessage, SocketAddr)>;
-pub type ConnectorSender = UnboundedSender<(RpcMessage, SocketAddr)>;
+pub type ConnectorReceiver = UnboundedReceiver<(Message, SocketAddr)>;
+pub type ConnectorSender = UnboundedSender<(Message, SocketAddr)>;
 
 pub fn new_connector(addr: SocketAddr) -> (ConnectorSender, ConnectorReceiver) {
     let (outbound_tx, outbound_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(RpcMessage, SocketAddr)>();
+        tokio::sync::mpsc::unbounded_channel::<(Message, SocketAddr)>();
     let (inbound_tx, mut inbound_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(RpcMessage, SocketAddr)>();
+        tokio::sync::mpsc::unbounded_channel::<(Message, SocketAddr)>();
     tokio::spawn(async move {
         let socket = UdpSocket::bind(&addr).await.unwrap();
-        let framed = UdpFramed::new(socket, RpcCodec::new());
+        let framed = UdpFramed::new(socket, MessageCodec::new());
         let (mut udp_tx, mut udp_rx) = framed.split();
         loop {
             select! {
@@ -63,6 +63,8 @@ pub fn new_connector(addr: SocketAddr) -> (ConnectorSender, ConnectorReceiver) {
 
 #[cfg(test)]
 mod tests {
+    use crate::{key::Key, rpc::Request};
+
     use super::*;
     use futures::SinkExt;
     use std::net::SocketAddr;
@@ -71,25 +73,38 @@ mod tests {
     use tokio_stream::StreamExt;
     use tokio_util::udp::UdpFramed;
 
-    fn select_msg() -> RpcMessage {
+    fn select_msg() -> Message {
         match fastrand::u8(0..3) {
-            0 => RpcMessage::FindNode,
-            1 => RpcMessage::FindValue,
-            2 => RpcMessage::Ping,
-            _ => RpcMessage::Store,
+            0 => Message::store(Key::rand(), "Hello world!".into()),
+            1 => Message::find_node(Key::rand()),
+            2 => Message::find_value(Key::rand()),
+            _ => Message::ping(),
         }
     }
 
-    async fn read_from_socket(socket: &mut UdpFramed<RpcCodec>) -> Result<(), ()> {
+    async fn read_from_socket(socket: &mut UdpFramed<MessageCodec>) -> Result<(), ()> {
         let timeout = Duration::from_millis(200);
-        while let Ok(Some(Ok((req, addr)))) = time::timeout(timeout, socket.next()).await {
-            println!("[socket] recv: {:?} {:?}", addr, req);
+        while let Ok(Some(Ok((msg, addr)))) = time::timeout(timeout, socket.next()).await {
+            match msg {
+                Message::Request(req_id, Request::Store(key, data)) => {
+                    println!(
+                        "[socket] recv: {:?} Request(Key({:?}), Store(Key({:?}), {:?}))",
+                        addr,
+                        req_id,
+                        key,
+                        String::from_utf8(data)
+                    );
+                }
+                msg => {
+                    println!("[socket] recv: {:?} {:?}", addr, msg);
+                }
+            }
         }
         Ok(())
     }
 
     async fn write_into_socket(
-        socket: &mut UdpFramed<RpcCodec>,
+        socket: &mut UdpFramed<MessageCodec>,
         addr: SocketAddr,
     ) -> Result<(), ()> {
         for _ in 0..4usize {
@@ -111,8 +126,21 @@ mod tests {
 
     async fn received_from_connector(mut rx: ConnectorReceiver) -> Result<(), ()> {
         let timeout = Duration::from_millis(200);
-        while let Ok(Some((req, addr))) = time::timeout(timeout, rx.recv()).await {
-            println!("[connector] recv: {:?} {:?}", addr, req);
+        while let Ok(Some((msg, addr))) = time::timeout(timeout, rx.recv()).await {
+            match msg {
+                Message::Request(req_id, Request::Store(key, data)) => {
+                    println!(
+                        "[connector] recv: {:?} Request(Key({:?}), Store(Key({:?}), {:?}))",
+                        addr,
+                        req_id,
+                        key,
+                        String::from_utf8(data)
+                    );
+                }
+                msg => {
+                    println!("[connector] recv: {:?} {:?}", addr, msg);
+                }
+            }
         }
         Ok(())
     }
@@ -126,7 +154,7 @@ mod tests {
         let b = UdpSocket::bind(&addr).await.unwrap();
         let b_addr = b.local_addr().unwrap();
 
-        let mut b = UdpFramed::new(b, RpcCodec::new());
+        let mut b = UdpFramed::new(b, MessageCodec::new());
         let read = read_from_socket(&mut b);
 
         let send = send_to_connector(a_tx, b_addr);
@@ -147,7 +175,7 @@ mod tests {
 
         let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-        let mut b = UdpFramed::new(b, RpcCodec::new());
+        let mut b = UdpFramed::new(b, MessageCodec::new());
 
         let write = write_into_socket(&mut b, a_addr);
 
@@ -168,11 +196,11 @@ mod tests {
 
         let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a_addr = a.local_addr().unwrap();
-        let mut a = UdpFramed::new(a, RpcCodec::new());
+        let mut a = UdpFramed::new(a, MessageCodec::new());
         let read_socket = read_from_socket(&mut a);
 
         let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut b = UdpFramed::new(b, RpcCodec::new());
+        let mut b = UdpFramed::new(b, MessageCodec::new());
 
         let write_socket = write_into_socket(&mut b, c_addr);
 

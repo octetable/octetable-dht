@@ -5,11 +5,12 @@ use std::string::ToString;
 
 use hex::FromHex;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
 use crate::error::Error;
 
-#[derive(Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub struct Key([u8; 20]);
 
 impl Key {

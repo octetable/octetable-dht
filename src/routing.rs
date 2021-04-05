@@ -1,8 +1,11 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 
+use serde::{Deserialize, Serialize};
+
 use crate::key::Key;
 
+#[derive(Serialize, Deserialize, Debug)]
 pub struct NodeInfo {
     key: Key,
     address: SocketAddr,
